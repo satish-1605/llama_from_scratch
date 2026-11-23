@@ -1,0 +1,10 @@
+torch
+transformers
+tokenizers
+datasets
+numpy
+tqdm
+matplotlib
+tensorboard
+sentencepiece
+safetensors

@@ -1,0 +1,4 @@
+docs_local
+venv
+artifacts\checkpoints
+artifacts\logs
