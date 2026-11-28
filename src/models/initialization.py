@@ -28,7 +28,9 @@ def initialize_llama_weights(
         residual_projection_names: Exact named module paths of linear
             layers that require residual-scaled initialization.
     """
-
+    if not isinstance(n_layers, int) or isinstance(n_layers, bool):
+        raise TypeError("n_layers must be an integer.")
+    
     if n_layers <= 0:
         raise ValueError("n_layers must be positive")
 
@@ -38,10 +40,13 @@ def initialize_llama_weights(
     residual_std = init_std / math.sqrt(2 * n_layers)
     residual_names = set(residual_projection_names)
 
-    unknown_names = residual_names - {
-        name for name, module in model.named_modules()
+    linear_names = {
+        name
+        for name, module in model.named_modules()
         if isinstance(module, nn.Linear)
     }
+
+    unknown_names = residual_names - linear_names
 
     if unknown_names:
         raise ValueError(f"Unknown residual names {sorted(unknown_names)}")
@@ -69,8 +74,9 @@ def initialize_llama_weights(
                 nn.init.zeros_(module.bias)
 
     logger.info(
-        "Initialized LLaMA model: layers= {}, init_std={}.5f, "
-        "residual_std={}.6f, residual_projections={}",
+        "Initialized LLaMA weights | layers={} | "
+        "init_std={:.5f} | residual_std={:.6f} | "
+        "residual_projections={}",
         n_layers,
         init_std,
         residual_std,

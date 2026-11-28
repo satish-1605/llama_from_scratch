@@ -360,52 +360,35 @@ class ScaledDotProductAttention(nn.Module):
                 v: torch.Tensor,
                 is_causal:bool = False)-> torch.Tensor:
         """
-        Compute scaled dot-product attention.
+        Calculate scaled dot-product attention.
 
-        Steps:
-            1. Validate inputs.
-            2. Expand K and V heads for GQA.
-            3. Compute QK transpose.
-            4. Scale attention scores.
-            5. Apply causal mask if enabled.
-            6. Compute numerically stable Softmax in FP32.
-            7. Apply attention dropout.
-            8. Multiply attention weights with V.
-
-        Args:
-            q: Query tensor [B, Hq, T, D].
-            k: Key tensor [B, Hkv, T, D].
-            v: Value tensor [B, Hkv, T, Dv].
-            is_causal: Whether to prevent attention to future tokens.
-
-        Returns:
-            Attention output [B, Hq, T, Dv].
+        Uses FP32 for attention score and softmax computation.
         """
 
         self._validate_inputs(q, k, v, is_causal)
-        batch_size, num_query_heads, seq_len, head_dim = q.shape
+        _, num_query_heads, seq_q, head_dim = q.shape
+        seq_k = k.shape[-2]
 
         #Step 1: Expand K and V heads for GQA
         k,v = self._expand_kv_heads(k,v,num_query_heads)
 
-        # Step 2: Compute scaled attention scores
-        # Use FP32 for score computation and Softmax stability.
-        q_fp32 = q.float()
-        k_fp32 = k.float()
-
-        scores = torch.matmul(q_fp32, k_fp32.transpose(-2, -1))
+        scores = torch.matmul(q.float(), k.float().transpose(-2, -1))
         scores = scores /math.sqrt(head_dim)
 
         # Step 3: Apply causal mask
         if is_causal:
-            causal_mask = torch.triu(
-                torch.ones(
-                    seq_len, seq_len, 
-                    device = q.device, 
-                    dtype=torch.bool
-                ), diagonal=1
+            query_positions = (torch.arange(seq_k, device=q.device)
+                               + (seq_k - seq_q)
+                               )
+            key_positions = torch.arange(
+                            seq_k, device=q.device
+                        )
+            causal_mask = (
+                key_positions.unsqueeze(0)
+                > query_positions.unsqueeze(1)
             )
-            scores = scores.masked_fill(causal_mask, float("-inf"))
+            scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), 
+                                        float("-inf"))
 
         # Step 4: Numerically stable Softmax
         attn_weights = torch.softmax(scores, dim=-1)

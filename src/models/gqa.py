@@ -1,7 +1,9 @@
 from loguru import logger
 import torch
-import math
 import torch.nn as nn
+
+from src.models.attention import ScaledDotProductAttention
+from src.models.rope import (RotaryEmbedding, apply_rotary_pos_emb)
 
 class GroupedQueryAttention(nn.Module):
     """
@@ -33,7 +35,11 @@ class GroupedQueryAttention(nn.Module):
          sequence_length, head_dim]
     """
 
-    def __init__(self, hidden_dim:int, num_query_heads:int, num_kv_heads:int)->None:
+    def __init__(self, hidden_dim:int, 
+                 num_query_heads:int, 
+                 num_kv_heads:int,
+                 dropout : float = 0.0,
+                 rope_base : float = 10000.0)->None:
         super().__init__()
 
         if hidden_dim <= 0:
@@ -81,6 +87,15 @@ class GroupedQueryAttention(nn.Module):
 
         # output proj D -> D
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+        #rope 
+        self.rope = RotaryEmbedding(
+            head_dim=self.head_dim,
+            base=rope_base
+        )
+
+        # attention
+        self.attention = ScaledDotProductAttention(dropout=dropout)
 
         logger.info(
             "Initialized GQA: hidden_dim {}, "
@@ -194,11 +209,10 @@ class GroupedQueryAttention(nn.Module):
                      self.num_kv_heads, 
                      self.num_query_groups, 
                      seq_len, 
-                     self.head_dim)
-
+                     head_dim)
         return q
 
-    def merge_query_heads(self, q:torch.Tensor)->torch.Tensor:
+    def merge_query_heads(self, x:torch.Tensor)->torch.Tensor:
         """
         Merge Query heads back into the hidden dimension.
 
@@ -209,12 +223,12 @@ class GroupedQueryAttention(nn.Module):
             [B, T, D]
         """
 
-        if q.ndim != 4:
+        if x.ndim != 4:
             raise ValueError(
-                f"Expected a 4D tensor [B, Hq, T, Dh], got {q.shape}"
+                f"Expected a 4D tensor [B, Hq, T, Dh], got {x.shape}"
             )
 
-        batch_size, num_heads, seq_len, head_dim = q.shape
+        batch_size, num_heads, seq_len, head_dim = x.shape
 
         if num_heads != self.num_query_heads:
             raise ValueError(
@@ -227,13 +241,13 @@ class GroupedQueryAttention(nn.Module):
                 f"Expected head_dim {self.head_dim}, got {head_dim}"
             )
 
-        q = q.transpose(1, 2).contiguous()
-        q = q.reshape(
+        x = x.transpose(1, 2).contiguous()
+        x = x.reshape(
             batch_size,
             seq_len,
             self.hidden_dim,
         )
-        return q
+        return x
 
     def project_output(self, x:torch.Tensor)->torch.Tensor:
         """
@@ -252,7 +266,9 @@ class GroupedQueryAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        is_causal: bool = True,
+        position_offset : int = 0,
+    ) -> torch.Tensor:
 
         """
         Generate Query, Key and Value representations.
@@ -288,21 +304,26 @@ class GroupedQueryAttention(nn.Module):
         k = self.split_kv_heads(k)
         v = self.split_kv_heads(v)
 
-        logger.debug(
-            "GQA tensor shapes: Q={}, K={}, V={}",
-            tuple(q.shape),
-            tuple(k.shape),
-            tuple(v.shape),
+        # Generate RoPE embeddings
+        cos, sin = self.rope(
+            seq_len = q.shape[-2],
+            device = q.device,
+            dtype = q.dtype,
+            position_offset = position_offset,
+        )
+        #Apply RoPE to Q and K
+        q, k = apply_rotary_pos_emb(
+            q=q,
+            k=k, 
+            cos=cos,
+            sin=sin
         )
 
-        return q, k, v
+        # Scaled Dot-Product Attention
+        attention_output = self.attention(
+            q, k, v, is_causal=is_causal
+        )
 
-
-
-
-
-
-
-
-
-
+        # Merge heads + output projection
+        output = self.project_output(attention_output)
+        return output

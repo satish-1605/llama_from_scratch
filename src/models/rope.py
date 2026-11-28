@@ -1,19 +1,3 @@
-
-"""
-Rotary Positional Embeddings (RoPE) implementation.
-
-This module implements LLaMA-style Rotary Positional Embeddings
-using the split-half rotation convention.
-
-Expected input tensor layout:
-    [batch_size, seq_len, num_heads, head_dim]
-
-Main components:
-    1. rotate_half()
-    2. RotaryEmbedding
-    3. apply_rotary_pos_emb()
-"""
-
 import torch
 from loguru import logger
 import torch.nn as nn
@@ -77,21 +61,17 @@ class RotaryEmbedding(nn.Module):
     def __init__(self, head_dim: int, base: float = 10000.0,)->None:
         super().__init__()
 
-        if head_dim <= 0:
-            raise ValueError(
-                f"head_dim must be positive. Received {head_dim}"
-            )
+        if not isinstance(head_dim, int) or isinstance(head_dim, bool):
+            raise TypeError("head_dim must be an integer.")
 
-        if head_dim % 2 != 0:
+        if head_dim <= 0 or head_dim % 2 != 0:
             raise ValueError(
-                f"head_dim must be even for RoPE. Received {head_dim}"
+                "head_dim must be a positive even integer."
             )
 
         if base <= 0:
-            raise ValueError(
-                f"base must be positive. Received {base}"
-            )
-
+            raise ValueError("base must be positive.")
+        
         self.head_dim = head_dim
         self.base= base
 
@@ -134,22 +114,26 @@ class RotaryEmbedding(nn.Module):
         Raises:
             ValueError: If sequence length or position offset is invalid.
         """
+        if not isinstance(seq_len, int) or isinstance(seq_len, bool):
+            raise TypeError("seq_len must be an integer.")
+
         if seq_len <= 0:
-            raise ValueError(
-                f"seq_len must be positive. Received {seq_len}"
-            )
+            raise ValueError("seq_len must be positive.")
+
+        if (
+            not isinstance(position_offset, int)
+            or isinstance(position_offset, bool)
+        ):
+            raise TypeError("position_offset must be an integer.")
 
         if position_offset < 0:
-            raise ValueError(
-                f"position_offset cannot be negative. "
-                f"Received {position_offset}"
-            )
+            raise ValueError("position_offset cannot be negative.")
 
         if device is None:
             device = self.inv_freq.device
 
         if dtype is None:
-            dtype = torch.float32
+            dtype = self.inv_freq.dtype
 
         # generate position indices
         pos = torch.arange(
@@ -178,8 +162,8 @@ class RotaryEmbedding(nn.Module):
 
         # Add batch and head broadcasting dimensions.
         # Shape: [1, seq_len, 1, head_dim]
-        cos = cos.unsqueeze(0).unsqueeze(2)
-        sin = sin.unsqueeze(0).unsqueeze(2)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
 
         # convert to the requested dtype
         cos = cos.to(dtype=dtype)
@@ -226,48 +210,37 @@ def apply_rotary_pos_emb(
     """
 
     if q.ndim != 4 or k.ndim != 4:
-        raise ValueError(
-            "Query and Key must have 4 dimensions: "
-            "[batch, seq_len, num_heads, head_dim]"
-        )
+        raise ValueError("Q and K must have shape [B,H,T,Dh].")
 
     if q.shape[0] != k.shape[0]:
-        raise ValueError("Query and Key batch sizes must match.")
+        raise ValueError("Q and K batch sizes must match.")
 
-    if q.shape[1] != k.shape[1]:
-        raise ValueError("Query and Key sequence lengths must match.")
-
-    if q.shape[-1] != k.shape[-1]:
-        raise ValueError("Query and Key head dimensions must match.")
+    if q.shape[-2:] != k.shape[-2:]:
+        raise ValueError("Q and K sequence/head dimensions must match.")
 
     if q.shape[-1] % 2 != 0:
         raise ValueError("RoPE requires an even head dimension.")
 
-    expected_shape = (1, q.shape[1], 1, q.shape[-1])
+    if q.device != k.device:
+        raise ValueError("Q and K must be on the same device.")
+
+    expected_shape = (1, 1, q.shape[-2], q.shape[-1])
 
     if tuple(cos.shape) != expected_shape:
         raise ValueError(
-            f"Invalid cos shape. Expected {expected_shape}, "
-            f"received {tuple(cos.shape)}"
+            f"Expected cos shape {expected_shape}, "
+            f"received {tuple(cos.shape)}."
         )
 
     if tuple(sin.shape) != expected_shape:
         raise ValueError(
-            f"Invalid sin shape. Expected {expected_shape}, "
-            f"received {tuple(sin.shape)}"
+            f"Expected sin shape {expected_shape}, "
+            f"received {tuple(sin.shape)}."
         )
-
-    if q.device != k.device or q.device != cos.device or q.device != sin.device:
-        raise ValueError(
-            "Query, Key, cosine and sine tensors must be on the same device."
-        )
-
-    if q.dtype != k.dtype:
-        raise ValueError("Query and Key must have the same dtype.")
 
     # Ensure cosine and sine use the input tensor dtype.
-    cos = cos.to(dtype=q.dtype)
-    sin = sin.to(dtype=q.dtype)
+    cos = cos.to(dtype=q.dtype, device=q.device)
+    sin = sin.to(dtype=q.dtype, device=q.device)
 
     q_rotated = (q * cos) + (rotate_half(q) * sin)
     k_rotated = (k * cos) + (rotate_half(k) * sin)
@@ -275,8 +248,6 @@ def apply_rotary_pos_emb(
     logger.debug("Applied RoPE, q_shape {} | k_shape {}", tuple(q.shape), tuple(k.shape))
 
     return q_rotated, k_rotated
-
-
 
 
 
